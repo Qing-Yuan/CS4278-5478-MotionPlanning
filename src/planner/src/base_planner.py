@@ -9,6 +9,7 @@ from const import *
 from math import *
 import copy
 import argparse
+import heapq
 
 ROBOT_SIZE = 0.2552  # width and height of robot in terms of stage unit
 
@@ -345,6 +346,39 @@ class Planner:
             time.sleep(1)
             current_state = self.get_current_state()
 
+class DSDA(Planner):
+    def generate_plan(self):
+        print(self.map)
+        self.action_seq = []
+        current = self.pose.pose.pose
+        print(self.pose)
+        current_distance = 0
+        actions = []
+        while not self._check_goal((current.position.x, current.position.y)):
+            # print("----------------")
+            # print(heapq)
+            # print("----------------")
+            for action in self.action_table:
+                next_pos = self.discrete_motion_predict(current.position.x, current.position.y, current.position.z)
+                if self.collision_checker(next_pos[0], next_pos[1]):
+                    continue
+                h = self._d_from_goal(next_pos)
+                current_distance = current_distance + 1
+                heapq.heappush(actions, (h + current_distance, action))
+            action_to_take = heapq.heappop(actions)
+            current = (current.position.x + action_to_take[0], current.position.y + action[1])
+            self.action_seq.append(current)
+
+
+class CSDA(Planner):
+    def generate_plan(self):
+        return super().generate_plan()
+
+
+class DSPA(Planner):
+    def generate_plan(self):
+        return super().generate_plan()
+
 
 if __name__ == "__main__":
     # TODO: You can run the code using the code below
@@ -371,13 +405,20 @@ if __name__ == "__main__":
 
     # TODO: You should change this value accordingly
     inflation_ratio = 3
-    planner = Planner(width, height, resolution, inflation_ratio=inflation_ratio)
+    # planner = Planner(width, height, resolution, inflation_ratio=inflation_ratio)
+    planner = DSDA(width, height, resolution, inflation_ratio=inflation_ratio)
+    # planner = CSDA(width, height, resolution, inflation_ratio=inflation_ratio)
+    # planner = DSPA(width, height, resolution, inflation_ratio=inflation_ratio)
     planner.set_goal(goal[0], goal[1])
     if planner.goal is not None:
         planner.generate_plan()
 
     # You could replace this with other control publishers
     planner.publish_discrete_control()
+    # Continuous
+    # planner.publish_control()
+    # MDP
+    # planner.publish_stochastic_control
 
     # save your action sequence
     result = np.array(planner.action_seq)
