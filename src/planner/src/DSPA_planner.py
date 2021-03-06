@@ -10,6 +10,9 @@ from math import *
 import copy
 import argparse
 import heapq
+from base_planner import *
+import time
+import json
 
 ROBOT_SIZE = 0.2552  # width and height of robot in terms of stage unit
 
@@ -31,7 +34,7 @@ def dump_action_table(action_table, filename):
         json.dump(tab, fout)
 
 
-class Planner:
+class DSPA(Planner):
     def __init__(self, world_width, world_height, world_resolution, inflation_ratio=3):
         """init function of the base planner. You should develop your own planner
         using this class as a base.
@@ -55,6 +58,13 @@ class Planner:
         self.action_seq = None  # output
         self.aug_map = None  # occupancy grid with inflation
         self.action_table = {}
+
+        # Initialise actions space
+        FORWARD = (1, 0)
+        LEFT = (0, 1)
+        RIGHT = (0, -1)
+        STAY = (0, 0)
+        self.actions = [FORWARD, LEFT, RIGHT]
 
         self.world_width = world_width
         self.world_height = world_height
@@ -212,7 +222,81 @@ class Planner:
 
         Each action could be: (v, \omega) where v is the linear velocity and \omega is the angular velocity
         """
-        self.action_seq = []
+        THRESHOLD = 0.05
+        GAMMA = 0.9
+        PROB_CORRECT_ACTION = 0.9
+        PROB_WRONG_ACTION = 0.05
+
+        # Initialise states
+        states = []
+        for i in range(self.world_height):
+            for j in range(self.world_width):
+                for k in range(4):
+                    states.append((i, j, k))
+        
+        # Initialise reward function and value function
+        rewards = {}
+        value_function = {}
+        for state in states:
+            value_function[state] = 0
+            if self._check_goal((state[0], state[1])):
+                print("Initialised goal reward")
+                rewards[state] = 10
+            elif self.aug_map[state[0]][state[1]] == 100:
+                rewards[state] = -2
+            
+            else:
+                rewards[state] = 1
+
+        # Actual value iteration
+        iteration = 0
+        while True:
+            print("iteration", iteration)
+            largest_update = 0
+            for state in states:
+                old_value = value_function[state]
+                new_value = float('-inf')
+
+                for action in self.actions:
+                    next_pos = self.discrete_motion_predict(state[0], state[1], state[2], action[0], action[1])
+                    if next_pos is None:
+                        continue
+                    wrong_next_poses = self.get_wrong_next_poses(state, action)
+
+                    # Get other possible states that robot can end up at and handle None for index out of bounds
+                    one_step_V = 0
+                    if wrong_next_poses[0] is None:
+                        one_step_V += -2
+                    else:
+                        one_step_V += value_function[wrong_next_poses[0]]
+                    if wrong_next_poses[1] is None:
+                        one_step_V += -2
+                    else:
+                        one_step_V += value_function[wrong_next_poses[1]]
+                    one_step_V *= PROB_WRONG_ACTION
+
+                    V = rewards[state] + (GAMMA * ((PROB_CORRECT_ACTION * value_function[next_pos]) + one_step_V))
+                    if V > new_value:
+                        new_value = V
+                        self.action_table[state] = action
+
+                value_function[state] = new_value
+                largest_update = max(largest_update, np.abs(old_value - value_function[state]))
+
+            if largest_update < THRESHOLD:
+                break
+
+            iteration += 1
+
+        print("Policy completed")
+
+    def get_wrong_next_poses(self, state, action):
+        next_pos = []
+        for act in self.actions:
+            if not act == action:
+                next_pos.append(self.discrete_motion_predict(state[0], state[1], state[2], action[0], action[1]))
+
+        return next_pos
 
     def get_current_continuous_state(self):
         """Our state is defined to be the tuple (x,y,theta). 
@@ -260,6 +344,7 @@ class Planner:
         y = int(round(y) / self.resolution)
 
         return ((x < 0) or (x >= self.world_width) or (y < 0) or (y >= self.world_height) or (self.aug_map[y][x] == 100))
+
 
     def motion_predict(self, x, y, theta, v, w, dt=0.5, frequency=10):
         """predict the next pose of the robot given controls. Returns None if the robot collide with the wall
@@ -354,13 +439,12 @@ class Planner:
         Please use this function to publish your controls in task 3, MDP. DO NOT CHANGE THE PARAMETERS :)
         We will test your policy using the same function.
         """
-        current_state = self.get_current_state()
+        current_state = self.get_current_discrete_state()
         actions = []
         new_state = current_state
         while not self._check_goal(current_state):
-            current_state = self.get_current_state()
-            action = self.action_table[current_state[0],
-                                       current_state[1], current_state[2] % 4]
+            current_state = self.get_current_discrete_state()
+            action = self.action_table[current_state[0], current_state[1], current_state[2] % 4]
             if action == (1, 0):
                 r = np.random.rand()
                 if r < 0.9:
@@ -370,13 +454,13 @@ class Planner:
                 else:
                     action = (np.pi/2, -1)
             print("Sending actions:", action[0], action[1]*np.pi/2)
-            msg = create_control_msg(action[0], 0, 0, 0, 0, action[1]*np.pi/2)
+            msg = self.create_control_msg(action[0], 0, 0, 0, 0, action[1]*np.pi/2)
             self.controller.publish(msg)
             rospy.sleep(0.6)
             self.controller.publish(msg)
             rospy.sleep(0.6)
             time.sleep(1)
-            current_state = self.get_current_state()
+            current_state = self.get_current_discrete_state()
 
 
 if __name__ == "__main__":
@@ -403,21 +487,24 @@ if __name__ == "__main__":
         resolution = 0.05
 
     # TODO: You should change this value accordingly
-    inflation_ratio = 3
-    planner = Planner(width, height, resolution, inflation_ratio=inflation_ratio)
+    inflation_ratio = 5
+    # inflation_ratio = int(round(ROBOT_SIZE / resolution + 1))
+    planner = DSPA(width, height, resolution, inflation_ratio=inflation_ratio)
     planner.set_goal(goal[0], goal[1])
     if planner.goal is not None:
         planner.generate_plan()
 
     # You could replace this with other control publishers
-    planner.publish_discrete_control()
+    # MDP
+    dump_action_table(planner.action_table, '3_com1_31_2.json')
+
+    planner.publish_stochastic_control()
 
     # save your action sequence
-    result = np.array(planner.action_seq)
-    np.savetxt("action_continuous", result, fmt="%.2e")
+    # result = np.array(planner.action_seq)
+    # np.savetxt("1_maze1_5_5_test.txt", result, fmt="%.2e")
 
     # for MDP, please dump your policy table into a json file
-    # dump_action_table(planner.action_table, 'mdp_policy.json')
 
     # spin the ros
     rospy.spin()

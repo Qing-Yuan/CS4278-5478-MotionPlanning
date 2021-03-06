@@ -10,6 +10,7 @@ from math import *
 import copy
 import argparse
 import heapq
+from base_planner import *
 
 ROBOT_SIZE = 0.2552  # width and height of robot in terms of stage unit
 
@@ -31,7 +32,7 @@ def dump_action_table(action_table, filename):
         json.dump(tab, fout)
 
 
-class Planner:
+class CSDA(Planner):
     def __init__(self, world_width, world_height, world_resolution, inflation_ratio=3):
         """init function of the base planner. You should develop your own planner
         using this class as a base.
@@ -212,7 +213,78 @@ class Planner:
 
         Each action could be: (v, \omega) where v is the linear velocity and \omega is the angular velocity
         """
+        # Keeps track of path
+        parent = {}
+        # heap
+        nodesToTry = []
+        heap_dict = dict()
+
+        FORWARD_ACTION = (1, 0)
+        LEFT_ACTION = (0, 1)
+        RIGHT_ACTION = (0, -1)
+        HALF_LEFT_ACTION = (0, 0.5)
+        HALF_RIGHT_ACTION = (0, -0.5)
+        STAY_ACTION = (0, 0)
+        actions = [FORWARD_ACTION, LEFT_ACTION, RIGHT_ACTION, HALF_LEFT_ACTION, HALF_RIGHT_ACTION]
+
+        source = self.get_current_continuous_state()
+        print(source)
+        g = 0
+        h = self._d_from_goal(source)
+        f = g + h
+        heapq.heappush(nodesToTry, (f, (g, source, STAY_ACTION)))
+        heap_dict[source] = g
+        visited = set()
+        goal_orientation = None
+
+        while len(nodesToTry) > 0:
+            current = heapq.heappop(nodesToTry)
+            if (self._check_goal(current[1][1])):
+                print("goal found!")
+                goal_orientation = current[1][1][2]
+                # goal is reached
+                break
+            visited.add(current[1][1])
+            current_g = current[1][0]
+            current_x = current[1][1][0]
+            current_y = current[1][1][1]
+            current_theta = current[1][1][2]
+            print(current_x, current_y, current_theta)
+            for action in actions:
+                current_v = action[0]
+                current_w = action[1]
+                next_pos = self.motion_predict(current_x, current_y, current_theta * np.pi/2, current_v, current_w * np.pi/2)
+                next_pos = (next_pos[0], next_pos[1], next_pos[2] / (np.pi/2))
+                if next_pos is None:
+                    # collision
+                    continue
+                discretised_next_pos = (int(round(next_pos[0])), int(round(next_pos[1])), int(round(next_pos[2])))
+                if discretised_next_pos in visited:
+                    # been here before
+                    continue
+                next_pos_g = current_g + 1
+                next_pos_h = self._d_from_goal(next_pos)
+                next_pos_f = next_pos_g + next_pos_h
+                if discretised_next_pos in heap_dict:
+                    if next_pos_g > heap_dict[discretised_next_pos]:
+                        # added to heap before and g value was better
+                        continue
+                heapq.heappush(nodesToTry, (next_pos_f, (next_pos_g, next_pos, action)))
+                heap_dict[discretised_next_pos] = next_pos_g
+                parent[discretised_next_pos] = (current[1][1], action)
+        
+        if goal_orientation is None:
+            print("Cannot find path to goal")
+            return
+
+        # Backtracking
         self.action_seq = []
+        current = (self._get_goal_position()[0], self._get_goal_position()[1], goal_orientation)
+        while current != source:
+            action_taken = parent[current][1]
+            self.action_seq.insert(0, action_taken)
+            current = parent[current][0]
+        print("backtracked to source")
 
     def get_current_continuous_state(self):
         """Our state is defined to be the tuple (x,y,theta). 
@@ -403,18 +475,18 @@ if __name__ == "__main__":
         resolution = 0.05
 
     # TODO: You should change this value accordingly
-    inflation_ratio = 3
-    planner = Planner(width, height, resolution, inflation_ratio=inflation_ratio)
+    # inflation_ratio = 15
+    inflation_ratio = 2 * int(round(ROBOT_SIZE / resolution + 1))
+    planner = CSDA(width, height, resolution, inflation_ratio=inflation_ratio)
     planner.set_goal(goal[0], goal[1])
     if planner.goal is not None:
         planner.generate_plan()
 
     # You could replace this with other control publishers
-    planner.publish_discrete_control()
+    planner.publish_control()
 
     # save your action sequence
     result = np.array(planner.action_seq)
-    np.savetxt("action_continuous", result, fmt="%.2e")
 
     # for MDP, please dump your policy table into a json file
     # dump_action_table(planner.action_table, 'mdp_policy.json')
